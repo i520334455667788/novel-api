@@ -4,13 +4,32 @@ import urllib.request
 import urllib.parse
 from bs4 import BeautifulSoup
 import re
+import chardet 
 
 app = Flask(__name__)
 CORS(app)
 
+def fetch_html(url):
+    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+    response = urllib.request.urlopen(req, timeout=15)
+    raw_data = response.read()
+    
+    detected = chardet.detect(raw_data)
+    encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
+    
+    if encoding and encoding.lower() in ['gb2312', 'gbk', 'gb18030']:
+        encoding = 'gb18030' 
+    elif encoding and 'big5' in encoding.lower():
+        encoding = 'big5hkscs'
+        
+    try:
+        return raw_data.decode(encoding, errors='replace')
+    except:
+        return raw_data.decode('utf-8', errors='ignore')
+
 @app.route('/api/status', methods=['GET'])
 def status():
-    return jsonify({"status": "running", "message": "Vercel API 連線成功！"})
+    return jsonify({"status": "running", "message": "Vercel API 連線成功！(支援防亂碼)"})
 
 @app.route('/api/search', methods=['GET'])
 def search_novel():
@@ -23,17 +42,12 @@ def search_novel():
         {"url": f"https://html.duckduckgo.com/html/?q={urllib.parse.quote(query)}", "type": "ddg"}
     ]
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-    
     results = []
     last_error = ""
     
     for engine in search_engines:
         try:
-            req = urllib.request.Request(engine["url"], headers=headers)
-            html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
+            html = fetch_html(engine["url"])
             soup = BeautifulSoup(html, 'html.parser')
             
             if engine["type"] == "bing":
@@ -57,8 +71,7 @@ def search_novel():
                             "url": href,
                             "source": urllib.parse.urlparse(href).netloc
                         })
-            if len(results) > 0:
-                break 
+            if len(results) > 0: break 
         except Exception as e:
             last_error = str(e)
             continue
@@ -73,11 +86,11 @@ def search_novel():
 def get_toc():
     url = request.args.get('url')
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='ignore')
+        html = fetch_html(url)
         soup = BeautifulSoup(html, 'html.parser')
         chapters = []
         seen = set()
+        
         for a in soup.find_all('a', href=True):
             text = a.text.strip()
             if re.search(r'(第[零一二三四五六七八九十百千万亿0-9]+[章回节折篇]|^\d+\s*$|^\d+\.|^Chapter)', text, re.I):
@@ -85,6 +98,19 @@ def get_toc():
                 if abs_url not in seen:
                     seen.add(abs_url)
                     chapters.append({"title": text, "url": abs_url})
+        
+        if len(chapters) < 5:
+            chapters = []
+            seen = set()
+            for div in soup.find_all(['div', 'dl'], class_=re.compile(r'list|ml|chapter')):
+                for a in div.find_all('a', href=True):
+                    text = a.text.strip()
+                    if text:
+                        abs_url = urllib.parse.urljoin(url, a['href'])
+                        if abs_url not in seen:
+                            seen.add(abs_url)
+                            chapters.append({"title": text, "url": abs_url})
+                            
         return jsonify({"success": True, "data": chapters})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -93,26 +119,29 @@ def get_toc():
 def get_content():
     url = request.args.get('url')
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        html = urllib.request.urlopen(req, timeout=10).read().decode('utf-8', errors='ignore')
+        html = fetch_html(url)
         soup = BeautifulSoup(html, 'html.parser')
-        for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'a']):
+        
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer', 'a', 'h1']):
             tag.decompose()
+            
         best_div = None
         max_len = 0
-        for div in soup.find_all(['div', 'article', 'main', '#content', '.content']):
+        for div in soup.find_all(['div', 'article', 'main', '#content', '#BookText', '.content', '.read_chapterDetail']):
             text = div.get_text()
             if len(text) > max_len and len(text) > 150:
                 max_len = len(text)
                 best_div = div
+                
         if best_div:
             content = str(best_div)
             content = re.sub(r'<br\s*/?>', '\n', content)
             content = re.sub(r'</p>', '\n', content)
             content = re.sub(r'<[^>]+>', '', content).replace('&nbsp;', ' ')
-            return jsonify({"success": True, "data": re.sub(r'\n\s*\n', '\n\n', content).strip()})
-        return jsonify({"error": "找不到正文"}), 404
+            
+            clean_text = re.sub(r'\n\s*\n', '\n\n', content).strip()
+            return jsonify({"success": True, "data": clean_text})
+            
+        return jsonify({"error": "找不到正文內容"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-# Vercel 不用 app.run()，只要有 app 這個變數就可以了
