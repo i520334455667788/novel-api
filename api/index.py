@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import urllib.request
+import urllib.error
 import urllib.parse
 from bs4 import BeautifulSoup
 import re
@@ -10,10 +11,22 @@ app = Flask(__name__)
 CORS(app)
 
 def fetch_html(url):
-    req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-    response = urllib.request.urlopen(req, timeout=15)
-    raw_data = response.read()
+    req = urllib.request.Request(url, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    })
     
+    try:
+        response = urllib.request.urlopen(req, timeout=15)
+        raw_data = response.read()
+    except urllib.error.HTTPError as e:
+        raise Exception(f"HTTP 錯誤: {e.code} (目標網站可能阻擋了抓取，或網址已失效)")
+    except urllib.error.URLError as e:
+        raise Exception(f"連線失敗: {e.reason}")
+    except Exception as e:
+        raise Exception(f"未知的連線錯誤: {str(e)}")
+        
     detected = chardet.detect(raw_data)
     encoding = detected['encoding'] if detected['encoding'] else 'utf-8'
     
@@ -29,7 +42,7 @@ def fetch_html(url):
 
 @app.route('/api/status', methods=['GET'])
 def status():
-    return jsonify({"status": "running", "message": "Vercel API 連線成功！(支援防亂碼)"})
+    return jsonify({"status": "running", "message": "Vercel API 連線成功！(V4 抗封鎖版)"})
 
 @app.route('/api/search', methods=['GET'])
 def search_novel():
@@ -80,7 +93,7 @@ def search_novel():
         unique_results = {r['url']: r for r in results}.values()
         return jsonify({"success": True, "data": list(unique_results)[:15]})
     else:
-        return jsonify({"error": f"所有搜尋引擎皆失敗: {last_error}"}), 500
+        return jsonify({"error": f"搜尋失敗: {last_error}"}), 500
 
 @app.route('/api/toc', methods=['GET'])
 def get_toc():
@@ -111,6 +124,9 @@ def get_toc():
                             seen.add(abs_url)
                             chapters.append({"title": text, "url": abs_url})
                             
+        if len(chapters) == 0:
+            return jsonify({"error": "解析失敗：無法在此網頁找到章節列表，可能是防爬蟲或是非小說目錄頁"}), 500
+            
         return jsonify({"success": True, "data": chapters})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
